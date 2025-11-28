@@ -1,10 +1,24 @@
 import type { DatabaseSync, StatementSync } from "node:sqlite"
 
-import { decodePath, decodeValue, encodePath, encodeValue, increment } from "./encoding.ts"
-import type { Table } from "./index.ts"
-import { CYCLES, DATABASE, type Path, PREFIX, PREPARED, PROTOTYPE } from "./internal.ts"
+import {
+	datatype,
+	decodePath,
+	decodeScalar,
+	encodeComplex,
+	encodePath,
+	encodeScalar,
+	increment,
+	type Path,
+} from "./encoding.ts"
+import { type Complex, Database, type Scalar, type Table } from "./index.ts"
 
-interface Inner {
+export const CYCLES = Symbol("cycles")
+export const DATABASE = Symbol("database")
+export const PREFIX = Symbol("path")
+export const PREPARED = Symbol("prepared")
+export const PROTOTYPE = Symbol("prototype")
+
+export interface Inner {
 	[PROTOTYPE]: null | typeof Array.prototype
 	[DATABASE]: DatabaseSync
 	[PREFIX]: Path
@@ -18,15 +32,19 @@ interface Inner {
 	[CYCLES]?: WeakSet<object>
 }
 
-const OBJECT_TAGS = {
-	RECORD: 0xff - 0,
-	ARRAY: 0xff - 1,
+export function key(prop: string): string | number {
+	const index = Number(prop)
+	if (Number.isSafeInteger(index) && index >= 0 && index < 0xffff_ffff) {
+		return index
+	} else {
+		return prop
+	}
 }
 
 export function table(database: DatabaseSync, name: string): Table {
 	const table = JSON.stringify(name)
 	database.exec(`
-	  CREATE TABLE IF NOT EXISTS ${table} (
+		CREATE TABLE IF NOT EXISTS ${table} (
 			path BLOB PRIMARY KEY NOT NULL,
 			value BLOB NOT NULL
 		) WITHOUT ROWID
@@ -39,17 +57,42 @@ export function table(database: DatabaseSync, name: string): Table {
 		[PREPARED]: {
 			selectOne: database.prepare(`SELECT value FROM ${table} WHERE path == :path`),
 			selectMany: database.prepare(
-				`SELECT path FROM ${table} WHERE path >= :lower AND path < :upper`,
+				`SELECT path, value FROM ${table} WHERE path >= :lower AND path < :upper`,
 			),
 			insert: database.prepare(`INSERT INTO ${table} (path, value) VALUES (:path, :value)`),
 			delete: database.prepare(`DELETE FROM ${table} WHERE path >= :lower AND path < :upper`),
 			length: database.prepare(`
-			  SELECT path FROM ${table}
+				SELECT path FROM ${table}
 				WHERE LENGTH(path) == LENGTH(:lower) AND path >= :lower AND path < :upper
 				ORDER BY path DESC LIMIT 1
 			`),
 		},
 	})
+}
+
+export function instanciate(from: DataView, inner: Inner, prefix: Path): Scalar | Complex {
+	switch (datatype(from)) {
+		case "record": {
+			return proxy({ ...inner, [PROTOTYPE]: null, [PREFIX]: prefix })
+		}
+		case "array": {
+			return proxy(
+				Object.defineProperty(
+					{ ...inner, [PROTOTYPE]: Array.prototype, [PREFIX]: prefix },
+					"length",
+					{
+						enumerable: false,
+						configurable: false,
+						writable: true,
+						value: 0,
+					},
+				),
+			)
+		}
+		default: {
+			return decodeScalar(from)
+		}
+	}
 }
 
 function proxy(inner: Inner): Table {
@@ -67,7 +110,7 @@ function proxy(inner: Inner): Table {
 			return false
 		},
 
-		getOwnPropertyDescriptor(target, prop) {
+		getOwnPropertyDescriptor(this: ProxyHandler<Inner>, target, prop) {
 			// Special cased array length
 			if (target[PROTOTYPE] === Array.prototype && prop === "length") {
 				const row = target[PREPARED].length.get({
@@ -110,49 +153,15 @@ function proxy(inner: Inner): Table {
 			}
 
 			const { value } = row as { value: Uint8Array<ArrayBuffer> }
-			switch (value[0]) {
-				case OBJECT_TAGS.RECORD: {
-					return {
-						enumerable: true,
-						configurable: true,
-						writable: true,
-						value: proxy({ ...target, [PROTOTYPE]: null, [PREFIX]: prefix }),
-					}
-				}
-
-				case OBJECT_TAGS.ARRAY: {
-					return {
-						enumerable: true,
-						configurable: true,
-						writable: true,
-						// We need to define a non-configurable length property for proxy correctness
-						value: proxy(
-							Object.defineProperty(
-								{ ...target, [PROTOTYPE]: Array.prototype, [PREFIX]: prefix },
-								"length",
-								{
-									enumerable: false,
-									configurable: false,
-									writable: true,
-									value: 0,
-								},
-							),
-						),
-					}
-				}
-
-				default: {
-					return {
-						enumerable: true,
-						configurable: true,
-						writable: true,
-						value: decodeValue(new DataView(value.buffer)),
-					}
-				}
+			return {
+				enumerable: true,
+				configurable: true,
+				writable: true,
+				value: instanciate(new DataView(value.buffer), target, prefix),
 			}
 		},
 
-		get(target, prop, receiver) {
+		get(this: ProxyHandler<Inner>, target, prop, receiver) {
 			const descriptor = this.getOwnPropertyDescriptor!(target, prop)
 			if (descriptor !== undefined) {
 				return descriptor.value
@@ -166,7 +175,7 @@ function proxy(inner: Inner): Table {
 			return Reflect.get(proto, prop, receiver)
 		},
 
-		has(target, prop) {
+		has(this: ProxyHandler<Inner>, target, prop) {
 			const descriptor = this.getOwnPropertyDescriptor!(target, prop)
 			if (descriptor !== undefined) {
 				return true
@@ -180,7 +189,7 @@ function proxy(inner: Inner): Table {
 			return Reflect.has(proto, prop)
 		},
 
-		defineProperty(target, prop, desc) {
+		defineProperty(this: ProxyHandler<Inner>, target, prop, desc) {
 			const value = desc.value
 			if (typeof prop === "symbol") {
 				return false
@@ -239,7 +248,7 @@ function proxy(inner: Inner): Table {
 
 					target[PREPARED].insert.run({
 						":path": encoded,
-						":value": encodeValue(value),
+						":value": encodeScalar(value),
 					})
 				} else {
 					if (!cycles) {
@@ -259,11 +268,9 @@ function proxy(inner: Inner): Table {
 						throw new TypeError("Invalid property descriptor")
 					}
 
-					const view = new DataView(new ArrayBuffer(1))
-					view.setUint8(0, array ? OBJECT_TAGS.ARRAY : OBJECT_TAGS.RECORD)
 					target[PREPARED].insert.run({
 						":path": encoded,
-						":value": view,
+						":value": encodeComplex(array ? "array" : "record"),
 					})
 
 					const t = { ...target, [PROTOTYPE]: array ? Array.prototype : null, [PREFIX]: prefix }
@@ -288,7 +295,7 @@ function proxy(inner: Inner): Table {
 			return true
 		},
 
-		set(target, prop, value) {
+		set(this: ProxyHandler<Inner>, target, prop, value) {
 			if (target[PROTOTYPE] === Array.prototype && prop === "length") {
 				return this.defineProperty!(target, prop, {
 					enumerable: false,
@@ -306,7 +313,7 @@ function proxy(inner: Inner): Table {
 			}
 		},
 
-		deleteProperty(target, prop) {
+		deleteProperty(this: ProxyHandler<Inner>, target, prop) {
 			if (typeof prop === "symbol") {
 				return false
 			} else if (target[PROTOTYPE] === Array.prototype && prop === "length") {
@@ -324,34 +331,11 @@ function proxy(inner: Inner): Table {
 		},
 
 		ownKeys(target) {
-			const prefix = target[PREFIX]
-			const encoded = encodePath(prefix)
-
-			const rows = target[PREPARED].selectMany.iterate({
-				":lower": encoded,
-				":upper": increment(encoded),
-			})
-
 			return Array.from(
-				rows
-					.map((row) => {
-						const { path } = row as { path: Uint8Array<ArrayBuffer> }
-						return decodePath(new DataView(path.buffer))
-					})
-					.filter((decoded) => decoded.length === prefix.length + 1)
-					.map((decoded) => String(decoded.at(-1))),
+				Database.entries(target as unknown as Complex).map(([key]) => String(key)),
 			)
 		},
 	})
 
 	return proxied as unknown as Table
-}
-
-function key(prop: string): string | number {
-	const index = Number(prop)
-	if (Number.isSafeInteger(index) && index >= 0 && index < 0xffff_ffff) {
-		return index
-	} else {
-		return prop
-	}
 }

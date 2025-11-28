@@ -1,0 +1,10 @@
+{
+	"extends": "../tsconfig.json",
+	"include": ["./"],
+	"references": [{ "path": "../" }],
+	"compilerOptions": {
+		"rootDir": "./",
+		"noEmit": true,
+		"rewriteRelativeImportExtensions": false
+	}
+}

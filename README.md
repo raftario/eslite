@@ -5,6 +5,11 @@ Requires Node.js 24 LTS.
 
 ## Usage
 
+`eslite` objects work pretty much like regular JavaScript objects, except all modifications are immediately persisted to a SQLite database.
+It's basically like doing `fs.writeFile(JSON.stringify(object))` on every change, except it's much more convenient, much faster, and supports a wider range of data types.
+
+Perfect for little side projects where you want to persist data without thinking too hard about how.
+
 ```ts
 import { Database } from "eslite";
 
@@ -15,16 +20,29 @@ interface User {
     banned: boolean;
 }
 
-// `Database` implements `Disposable`.
-using db = new Database("my.db");
-// Tables are untyped and do not perform validation.
-// You are responsible for the shape of the stored data.
-// Any modification to the `user` record will me persisted.
+// `Database` implements `Disposable`
+using db = new Database("login.db");
+// A database file called `login.db` will be created,
+// persisting all of the contents of the `users` object.
 const users = db.table("users") as Record<number, User>;
 
 function isAdmin(id: number): boolean {
     const user = users[id];
+    if (!user) {
+        return false;
+    }
+
     return !user.banned && user.roles.includes("admin");
+}
+
+function makeAdmin(id: number): void {
+    if (isAdmin(id)) {
+        return;
+    }
+
+    const user = users[id];
+    user.banned = false;
+    user.roles.push("admin");
 }
 
 function register(id: number, name: string): void {
@@ -40,6 +58,26 @@ function register(id: number, name: string): void {
     };
 }
 ```
+
+## Supported data types
+
+- `null`
+- `boolean`
+- `number`
+- `string`
+- `bigint`
+- `Date`
+- `RegExp`
+- Nested records and arrays of the former
+
+## Performance
+
+`eslite` will perform much better than de/serialising entire JSON objects on disk, but much worse than using a database normally.
+Records and arrays are shallow, meaning accessing one of their keys/indices will lazily query the SQLite database.
+This makes it possible to have very large databases without running into issues because only a small subset is ever loaded in memory,
+but also makes some access patterns suboptimal.
+
+Ultimately `eslite` is optimised for simplicity with good-enough performance, both in its usage and its implementation.
 
 ## License
 

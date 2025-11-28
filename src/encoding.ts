@@ -1,11 +1,13 @@
 import type { Scalar } from "./index.ts"
-import type { Path } from "./internal.ts"
+
+export type Path = (number | string)[]
+export type ComplexType = "record" | "array"
 
 const PATH_TAGS = {
 	NUMBER: 0,
 	STRING: 1,
 }
-const VALUE_TAGS = {
+const SCALAR_TAGS = {
 	NULL: 0,
 	TRUE: 1,
 	FALSE: 2,
@@ -15,10 +17,29 @@ const VALUE_TAGS = {
 	DATE: 6,
 	REGEXP: 7,
 }
+const COMPLEX_TAGS = {
+	RECORD: 0xff - 1,
+	ARRAY: 0xff - 2,
+}
 
+export function datatype(of: DataView): ComplexType | "scalar" {
+	switch (of.getUint8(0)) {
+		case COMPLEX_TAGS.RECORD: {
+			return "record"
+		}
+		case COMPLEX_TAGS.ARRAY: {
+			return "array"
+		}
+		default: {
+			return "scalar"
+		}
+	}
+}
+
+const ZERO_INCREMENT = Uint8Array.from([0xff])
 export function increment(prefix: DataView): DataView {
 	if (prefix.byteLength === 0) {
-		return new DataView(Uint8Array.from([1]).buffer)
+		return new DataView(ZERO_INCREMENT.buffer)
 	}
 
 	const copy = new Uint8Array(new ArrayBuffer(prefix.byteLength))
@@ -73,29 +94,29 @@ export function decodePath(from: DataView): Path {
 	return path
 }
 
-export function encodeValue(value: Scalar): DataView {
+export function encodeScalar(value: Scalar): DataView {
 	switch (typeof value) {
 		case "boolean": {
 			const view = new DataView(new ArrayBuffer(1))
-			view.setUint8(0, value ? VALUE_TAGS.TRUE : VALUE_TAGS.FALSE)
+			view.setUint8(0, value ? SCALAR_TAGS.TRUE : SCALAR_TAGS.FALSE)
 			return view
 		}
 		case "number": {
 			const view = new DataView(new ArrayBuffer(1 + 8))
-			view.setUint8(0, VALUE_TAGS.NUMBER)
+			view.setUint8(0, SCALAR_TAGS.NUMBER)
 			view.setFloat64(1, value)
 			return view
 		}
 		case "string": {
 			const view = new DataView(new ArrayBuffer(1 + value.length * 2))
-			view.setUint8(0, VALUE_TAGS.STRING)
+			view.setUint8(0, SCALAR_TAGS.STRING)
 			encodeString(value, view, 1)
 			return view
 		}
 		case "bigint": {
 			const s = value.toString()
 			const view = new DataView(new ArrayBuffer(1 + s.length * 2))
-			view.setUint8(0, VALUE_TAGS.BIGINT)
+			view.setUint8(0, SCALAR_TAGS.BIGINT)
 			encodeString(s, view, 1)
 			return view
 		}
@@ -105,13 +126,13 @@ export function encodeValue(value: Scalar): DataView {
 			} else if (value instanceof Date) {
 				const n = Number(value)
 				const view = new DataView(new ArrayBuffer(1 + 8))
-				view.setUint8(0, VALUE_TAGS.DATE)
+				view.setUint8(0, SCALAR_TAGS.DATE)
 				view.setFloat64(1, n)
 				return view
 			} else if (value instanceof RegExp) {
 				const s = value.toString()
 				const view = new DataView(new ArrayBuffer(1 + s.length * 2))
-				view.setUint8(0, VALUE_TAGS.REGEXP)
+				view.setUint8(0, SCALAR_TAGS.REGEXP)
 				encodeString(s, view, 1)
 				return view
 			} else {
@@ -124,32 +145,32 @@ export function encodeValue(value: Scalar): DataView {
 	}
 }
 
-export function decodeValue(from: DataView): Scalar {
+export function decodeScalar(from: DataView): Scalar {
 	switch (from.getUint8(0)) {
-		case VALUE_TAGS.NULL: {
+		case SCALAR_TAGS.NULL: {
 			return null
 		}
-		case VALUE_TAGS.TRUE: {
+		case SCALAR_TAGS.TRUE: {
 			return true
 		}
-		case VALUE_TAGS.FALSE: {
+		case SCALAR_TAGS.FALSE: {
 			return false
 		}
-		case VALUE_TAGS.NUMBER: {
+		case SCALAR_TAGS.NUMBER: {
 			return from.getFloat64(1)
 		}
-		case VALUE_TAGS.STRING: {
+		case SCALAR_TAGS.STRING: {
 			return String.fromCharCode(...decodeString(from, 1))
 		}
-		case VALUE_TAGS.BIGINT: {
+		case SCALAR_TAGS.BIGINT: {
 			const s = String.fromCharCode(...decodeString(from, 1))
 			return BigInt(s)
 		}
-		case VALUE_TAGS.DATE: {
+		case SCALAR_TAGS.DATE: {
 			const n = from.getFloat64(1)
 			return new Date(n)
 		}
-		case VALUE_TAGS.REGEXP: {
+		case SCALAR_TAGS.REGEXP: {
 			const s = String.fromCharCode(...decodeString(from, 1))
 			return new RegExp(s)
 		}
@@ -157,6 +178,12 @@ export function decodeValue(from: DataView): Scalar {
 			throw new RangeError("Unknown data type")
 		}
 	}
+}
+
+export function encodeComplex(type: ComplexType): DataView {
+	return new DataView(
+		Uint8Array.from([type === "array" ? COMPLEX_TAGS.ARRAY : COMPLEX_TAGS.RECORD]).buffer,
+	)
 }
 
 function encodeString(s: string, into: DataView, offset: number) {
