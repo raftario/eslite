@@ -1,6 +1,6 @@
 {
 	"name": "eslite",
-	"version": "0.1.0",
+	"version": "0.0.1",
 	"type": "module",
 	"packageManager": "pnpm@10.23.0",
 	"files": ["./src/", "./dist/"],
@@ -19,6 +19,7 @@
 	"contributors": ["Raphaël Thériault <self@raftar.io>"],
 	"repository": "raftario/eslite",
 	"publishConfig": {
+		"access": "public",
 		"provenance": true
 	},
 	"scripts": {

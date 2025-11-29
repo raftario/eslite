@@ -1,4 +1,5 @@
 import type { DatabaseSync, StatementSync } from "node:sqlite"
+import { type CustomInspectFunction, inspect } from "node:util"
 
 import {
 	datatype,
@@ -14,14 +15,15 @@ import { type Complex, Database, type Scalar, type Table } from "./index.ts"
 
 export const CYCLES = Symbol("cycles")
 export const DATABASE = Symbol("database")
-export const PREFIX = Symbol("path")
+export const PREFIX = Symbol("prefix")
 export const PREPARED = Symbol("prepared")
 export const PROTOTYPE = Symbol("prototype")
 
 export interface Inner {
 	[PROTOTYPE]: null | typeof Array.prototype
-	[DATABASE]: DatabaseSync
 	[PREFIX]: Path
+
+	[DATABASE]: DatabaseSync
 	[PREPARED]: {
 		selectOne: StatementSync
 		selectMany: StatementSync
@@ -29,7 +31,10 @@ export interface Inner {
 		delete: StatementSync
 		length: StatementSync
 	}
+
 	[CYCLES]?: WeakSet<object>
+
+	[inspect.custom]: CustomInspectFunction
 }
 
 export function key(prop: string): string | number {
@@ -52,8 +57,9 @@ export function table(database: DatabaseSync, name: string): Table {
 
 	return proxy({
 		[PROTOTYPE]: null,
-		[DATABASE]: database,
 		[PREFIX]: [],
+
+		[DATABASE]: database,
 		[PREPARED]: {
 			selectOne: database.prepare(`SELECT value FROM ${table} WHERE path == :path`),
 			selectMany: database.prepare(
@@ -67,26 +73,42 @@ export function table(database: DatabaseSync, name: string): Table {
 				ORDER BY path DESC LIMIT 1
 			`),
 		},
+
+		[inspect.custom](depth, options) {
+			const base = this[PROTOTYPE] === Array.prototype ? [] : {}
+			inspect(
+				Object.assign(base, Object.fromEntries(Database.entries(this as unknown as Complex))),
+				Object.assign(options, { depth }),
+			)
+		},
 	})
 }
 
 export function instanciate(from: DataView, inner: Inner, prefix: Path): Scalar | Complex {
 	switch (datatype(from)) {
 		case "record": {
-			return proxy({ ...inner, [PROTOTYPE]: null, [PREFIX]: prefix })
+			return proxy(
+				Object.assign(
+					{},
+					{
+						[PROTOTYPE]: null,
+						[PREFIX]: prefix,
+						[DATABASE]: inner[DATABASE],
+						[PREPARED]: inner[PREPARED],
+						[inspect.custom]: inner[inspect.custom],
+					},
+				),
+			)
 		}
 		case "array": {
 			return proxy(
-				Object.defineProperty(
-					{ ...inner, [PROTOTYPE]: Array.prototype, [PREFIX]: prefix },
-					"length",
-					{
-						enumerable: false,
-						configurable: false,
-						writable: true,
-						value: 0,
-					},
-				),
+				Object.assign([], {
+					[PROTOTYPE]: Array.prototype,
+					[PREFIX]: prefix,
+					[DATABASE]: inner[DATABASE],
+					[PREPARED]: inner[PREPARED],
+					[inspect.custom]: inner[inspect.custom],
+				}),
 			)
 		}
 		default: {
@@ -167,11 +189,11 @@ function proxy(inner: Inner): Table {
 				return descriptor.value
 			}
 
+			// Fallback to prototype chain
 			const proto = target[PROTOTYPE]
 			if (proto === null) {
 				return undefined
 			}
-
 			return Reflect.get(proto, prop, receiver)
 		},
 
@@ -181,19 +203,21 @@ function proxy(inner: Inner): Table {
 				return true
 			}
 
+			// Fallback to prototype chain
 			const proto = target[PROTOTYPE]
 			if (proto === null) {
 				return false
 			}
-
 			return Reflect.has(proto, prop)
 		},
 
 		defineProperty(this: ProxyHandler<Inner>, target, prop, desc) {
 			const value = desc.value
 			if (typeof prop === "symbol") {
+				// We only allow reading symbol properties, not defining them
 				return false
 			} else if (value === undefined) {
+				// We implement setting to undefined as deleting
 				this.deleteProperty!(target, prop)
 				return true
 			}
@@ -331,9 +355,15 @@ function proxy(inner: Inner): Table {
 		},
 
 		ownKeys(target) {
-			return Array.from(
-				Database.entries(target as unknown as Complex).map(([key]) => String(key)),
-			)
+			const keys = []
+
+			// Arrays must returns "length" here when proxied
+			if (target[PROTOTYPE] === Array.prototype) {
+				keys.push("length")
+			}
+
+			keys.push(...Database.entries(target as unknown as Complex).map(([key]) => String(key)))
+			return keys
 		},
 	})
 

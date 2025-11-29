@@ -130,10 +130,13 @@ export function encodeScalar(value: Scalar): DataView {
 				view.setFloat64(1, n)
 				return view
 			} else if (value instanceof RegExp) {
-				const s = value.toString()
-				const view = new DataView(new ArrayBuffer(1 + s.length * 2))
+				const view = new DataView(
+					new ArrayBuffer(1 + value.source.length * 2 + 2 + value.flags.length * 2),
+				)
 				view.setUint8(0, SCALAR_TAGS.REGEXP)
-				encodeString(s, view, 1)
+				encodeString(value.source, view, 1)
+				view.setUint16(1 + value.source.length * 2, 0xfffe)
+				encodeString(value.flags, view, 1 + value.source.length * 2 + 2)
 				return view
 			} else {
 				throw new TypeError("Unsupported data type")
@@ -171,8 +174,9 @@ export function decodeScalar(from: DataView): Scalar {
 			return new Date(n)
 		}
 		case SCALAR_TAGS.REGEXP: {
-			const s = String.fromCharCode(...decodeString(from, 1))
-			return new RegExp(s)
+			const source = String.fromCharCode(...decodeString(from, 1))
+			const flags = String.fromCharCode(...decodeString(from, 1 + source.length * 2 + 2))
+			return new RegExp(source, flags)
 		}
 		default: {
 			throw new RangeError("Unknown data type")
